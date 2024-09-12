@@ -1,0 +1,137 @@
+name: LLM Test Generation Pipeline
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+jobs:
+  recommend-unit-test:
+    name: Create and recommend unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+    # Checkout two previous commits to check what files were altered
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+
+    # Check if there were python files that were changed
+    - name: Check what files were changed
+      id: changes
+      run: |
+        set -e
+        
+        commit1=$(git log --pretty=format:"%H" -n 1)
+        commit2=$(git log --pretty=format:"%H" -n 2 | tail -n 1)
+        FILES=$(git diff --name-only $commit1 $commit2)
+
+        echo "Latest commit: $commit1"
+        echo "Original commit: $commit2"
+        echo "Files that have been changed in the latest commit:"
+        echo "$FILES"
+        
+        for file in $FILES; do
+          if [[ ! "$file" == *"/test-gen/*" ]]; then
+            if [[ "$file" == *.py ]]; then
+              exit 0
+            fi
+          fi
+        done
+        exit 1
+      continue-on-error: true
+
+    # Move files from test-gen to current directory to make test generation and testing easier
+    - name: Move files to current directory
+      if: steps.changes.outcome == 'success'
+      run: mv test-gen/* .
+
+    # If python files were changed, continue setup
+    - name: Set up python
+      uses: actions/setup-python@v5
+      if: steps.changes.outcome == 'success'
+      with:
+        python-version: "3.x"
+    
+    - name: Install dependencies
+      if: steps.changes.outcome == 'success'
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Configure git
+      if: steps.changes.outcome == 'success'
+      run: |
+        git config user.name "github-actions-bot"
+        git config user.email "github-actions-bot@github.com"
+        git config push.autoSetupRemote true
+
+    # Create and switch to a new branch
+    - name: Create new branch
+      if: steps.changes.outcome == 'success'
+      run: |
+        git checkout -b created-unit-tests-$(date +%Y%m%d%H%M%S)
+
+    # Ask for first set of unit tests from ChatGPT
+    - name: Ask for unit tests
+      if: steps.changes.outcome == 'success'
+      id: first-tests
+      run: |
+        set -e
+        
+        commit1=$(git log --pretty=format:"%H" -n 1)
+        commit2=$(git log --pretty=format:"%H" -n 2 | tail -n 1)
+        CHANGED_FILES=$(git diff --name-only $commit1 $commit2)
+
+        for file in $CHANGED_FILES; do
+          if [[ ! "$file" == *"/test-gen/*" ]]; then
+            if [[ "$file" == *.py ]]; then
+              echo "Unit tests will be generated from the following file:"
+              echo "$file"
+              echo "$file" > test_file.txt
+              python3 get_tests.py $file $API_KEY
+              exit 0
+            fi
+          fi
+        done
+        exit 1
+      env:
+        API_KEY: ${{ secrets.CHATGPT_API_KEY }}
+
+    # Test the first set of unit tests
+    - name: Test given unit tests
+      if: steps.first-tests.outcome == 'success'
+      id: run-tests
+      run: python3 test_tests.py unit_tests.py errors.txt
+      continue-on-error: true
+
+    # If unit tests gave errors, ask ChatGPT new ones based on the errors from first unit tests
+    - name: Ask for new unit tests
+      if: steps.run-tests.outcome == 'failure'
+      id: new-tests
+      run: |
+        FILE=$(cat test_file.txt)
+        python3 get_new_tests.py $FILE $API_KEY errors.txt
+      env:
+        API_KEY: ${{ secrets.CHATGPT_API_KEY }}
+
+    # Once unit tests have passed, commit the unit test file and push
+    - name: Commit and push unit tests
+      id: commit-tests
+      if: |
+        steps.run-tests.outcome == 'success' ||
+        steps.new-tests.outcome == 'success'
+      run: |
+        git add unit_tests.py
+        git commit -m "Add generated unit tests"
+        git push
+
+    # Once unit test file is pushed, create a pull request so that the created tests can be reviewed
+    - name: Create PR
+      if: steps.commit-tests.outcome == 'success'
+      run: |
+        gh pr create -B dev --title "Suggested unit tests" --body "ChatGPT suggested unit tests for your code"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
