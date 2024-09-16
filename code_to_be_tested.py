@@ -1,7 +1,7 @@
 # Some simple functions to demo the usage
 
-#def add_numbers(a, b):
-#    return a + b
+def add_numbers(a, b):
+    return a + b
 
 def addition(a, b):
     return a*b
