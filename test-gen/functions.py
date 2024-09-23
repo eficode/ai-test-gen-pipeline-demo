@@ -1,5 +1,5 @@
 import sys, os, unittest
-from code_to_be_tested import *
+from code-to-be-tested import *
 from openai import OpenAI
 
 # Exception for an error
